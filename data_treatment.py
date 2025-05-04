@@ -7,8 +7,17 @@ import cv2
 from skimage import measure
 import os
 import re
+
+# bibliothèque pour la partie projection des données
 from sklearn.manifold import TSNE
 import umap
+
+# bibliothèque pour la partie clustering
+from sklearn.cluster import KMeans
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import silhouette_score
+from sklearn.cluster import DBSCAN
 
 
 def extract_numbers(filename):
@@ -98,24 +107,28 @@ for i in range (min_length):
         continue
 
     r, g, b = bug_Area[:, 0], bug_Area[:, 1], bug_Area[:, 2]
-    bug_Area_size= np.count_nonzero(masks[i])
+    bug_Area_size= np.count_nonzero(mask_img)
 
     rgb_features = {"r_min": r.min(),"r_max": r.max(), "r_mean": r.mean(),"r_median":np.median(r), "r_std": r.std(),
                     "g_min": g.min(),"g_max": g.max(), "g_mean": g.mean(), "g_median":np.median(g),"g_std": g.std(),
                     "b_min": b.min(),"b_max": b.max(), "b_mean": b.mean(), "b_median":np.median(b),"b_std": b.std()}
     
     contours = measure.find_contours(mask_img, 0.5)
+    valid_contours = [c for c in contours if len(c) >= 3]
 
-    if contours:
-        contour = max(contours, key = lambda x : len(x))
-        hull = cv2.convexHull(contour.astype(np.float32))
+    if valid_contours:
+        contour = max(valid_contours, key=lambda c: cv2.contourArea(np.array(c, dtype=np.float32)))
+        contour  = np.array(contour.astype(np.float32))
 
+        contour_area = cv2.contourArea(contour)
+        hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
-        
-        convex_ratio = bug_Area_size / hull_area if hull_area > 0 else 0
-    
+
+        convex_ratio = contour_area / hull_area if hull_area > 0 else 0
+        excentricity = contour_area / (np.pi * (bug_Area_size / np.pi) ** 2) if bug_Area_size > 0 else 0
     else:
         convex_ratio = 0
+        exentricity = 0
 
 
     all_features = {
@@ -126,7 +139,8 @@ for i in range (min_length):
         "mask_shape_0": shappe_mask[0],
         "mask_shape_1": shappe_mask[1],
         "ratio": ratio,
-        "convex_ratio": convex_ratio
+        "convex_ratio": convex_ratio,
+        "exentricity": excentricity
     }
 
     all_features.update(rgb_features)
@@ -149,6 +163,7 @@ df_class = df_class[df_class['ID'] != 154]
 print("df_class.shape:", df_class.shape)
 
 bug_type_count = df_class['bug type'].value_counts()
+print("bug_type_count:", bug_type_count)
 
 plt.figure(figsize=(10, 6))
 bug_type_count.plot(kind='bar', color='skyblue')
@@ -273,3 +288,41 @@ plt.xlabel("UMAP 1")
 plt.ylabel("UMAP 2")
 plt.grid(True)
 plt.show()
+
+# ========== Dans cette partie on va faire un clustering sur les données projetées ==========
+
+# 1. KMeans Clustering
+
+X, y = projected_data , df_class['bug type'].values
+
+kmeans = KMeans(n_clusters =bug_type_count.shape[0], random_state=42)
+clusters = kmeans.fit_predict(X)
+
+X_with_clusters = X.copy()
+X_with_clusters = np.column_stack((X_with_clusters, clusters))
+
+X_train, X_test, y_train, y_test = train_test_split(X_with_clusters, y, test_size=0.3, random_state=42)
+
+log_reg = LogisticRegression()
+log_reg.fit(X_train, y_train)
+
+accuracy = log_reg.score(X_test, y_test)
+print(f"Accuracy of Logistic Regression on KMeans clusters: {accuracy:.2f}")
+
+score = silhouette_score(X_with_clusters, clusters) # sert à mesurer la cohérence des clusters
+print(f"Silhouette Score: {score:.2f}") # plus il est proche de 1, mieux c'est
+
+# Pour les résultats : plus de chevauchement entre les clusters pour X = projected_data donc score faible
+# Groupes bien séparés pour X = umap_projected donc score élevé
+
+# 2. DBSCAN Clustering
+
+X = umap_projected
+dbscan = DBSCAN(eps = 0.5, min_samples = 5)
+clusters = dbscan.fit_predict(X)
+
+score = silhouette_score(X, clusters)
+print(f"Silhouette Score: {score:.2f}") 
+
+n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
+print(f"Nombre de clusters détectés : {n_clusters}")
