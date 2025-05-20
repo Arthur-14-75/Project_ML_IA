@@ -18,7 +18,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import silhouette_score
 from sklearn.cluster import DBSCAN
-
+import hdbscan
+from sklearn.preprocessing import RobustScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 
 def extract_numbers(filename):
     # Use regex to find all numbers in the filename
@@ -195,18 +198,15 @@ def variances(df):
 
 vars = variances(numeric_df)
 
-def center_data(df):
-    nb_col = numeric_df.shape[1]
-    df = df.astype(float)
-    for i in range (nb_col):
-        df.iloc[:, i] = df.iloc[:, i] - df.iloc[:, i].mean()
-    return df
+def standardize_data(df):
+    return (df - df.mean()) / df.std()
 
-centered_data = center_data(numeric_df)
+standardized_df = standardize_data(numeric_df)
+
+centered_data = standardized_df
 
 def covariance_matrix(df):
-    numeric_df = df.select_dtypes(include=[np.number])
-    nb_col = numeric_df.shape[1]
+    nb_col = df.shape[1]
     cov_matrix = np.zeros((nb_col, nb_col))
     for i in range(nb_col):
         for j in range(nb_col):
@@ -236,16 +236,10 @@ def select_principal_components(eigenvalues, eigenvectors, k):
 
 selected_values, selected_vectors = select_principal_components(sorted_eigenvalues, sorted_eigenvectors, 2)
 
-def project_data(df, select_eigenvectors):
-    nb_col = df.shape[1]
-    projected_data = np.zeros((df.shape[0], select_eigenvectors.shape[1]))
-    for i in range(df.shape[0]):
-        for j in range (select_eigenvectors.shape[1]):
-            projected_data[i][j] = df.iloc[i,:].dot(select_eigenvectors[:,j])
+def project_data(df, eigenvectors):
+    return np.dot(df.values, eigenvectors)
 
-    return projected_data
-
-projected_data = project_data(centered_data, sorted_eigenvectors)
+projected_data = project_data(centered_data, selected_vectors)
 print("projected_data.shape:", projected_data.shape)
 #df_class = df_class.reset_index(drop=True)
 
@@ -261,12 +255,24 @@ def plot_pca(projected_data, df_class):
 
 plot_pca(projected_data, df_class)
 
+K  = 6
+kmeans = KMeans(n_clusters=K, random_state=42)
+clusters = kmeans.fit_predict(projected_data)
+
+plt.figure(figsize=(10, 6))
+scatter = plt.scatter(projected_data[:, 0], projected_data[:, 1], c=clusters, cmap='tab10', s=30)
+plt.xlabel("Principal Component 1")
+plt.ylabel("Principal Component 2")
+plt.title("PCA Projection with K-means Clusters")
+plt.colorbar(scatter, label="Cluster ID")
+plt.grid(True)
+plt.show()
 # =========== Maintenant qu'on a réalisé le pca, on va explorer une autre méthode de projection ==========
 
 # ========== On va utiliser t-SNE pour projeter les données dans un espace 2D ==========
 
 tsne = TSNE(n_components=2, perplexity=30, random_state=0)
-tsne_projected = tsne.fit_transform(numeric_df)
+tsne_projected = tsne.fit_transform(centered_data)
 
 plt.figure(figsize=(8,6))
 plt.scatter(tsne_projected[:, 0], tsne_projected[:, 1], color='red', alpha=0.5)
@@ -279,7 +285,7 @@ plt.show()
 # ========== On va maintenant essayer d'utiliser UMAP pour projeter les données dans un espace 2D ==========
 
 reducer = umap.UMAP(random_state=0)
-umap_projected = reducer.fit_transform(numeric_df)
+umap_projected = reducer.fit_transform(centered_data)
 
 plt.figure(figsize=(8,6))
 plt.scatter(umap_projected[:, 0], umap_projected[:, 1], color='green', alpha=0.5)
@@ -318,11 +324,11 @@ print(f"Silhouette Score: {score:.2f}") # plus il est proche de 1, mieux c'est
 # 2. DBSCAN Clustering
 
 X = umap_projected
-dbscan = DBSCAN(eps = 0.5, min_samples = 5)
-clusters = dbscan.fit_predict(X)
+clusterer = hdbscan.HDBSCAN(min_cluster_size=10)
+labels = clusterer.fit_predict(X)
 
-score = silhouette_score(X, clusters)
+score = silhouette_score(X, labels)
 print(f"Silhouette Score: {score:.2f}") 
 
-n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
-print(f"Nombre de clusters détectés : {n_clusters}")
+n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+print(f"HDBSCAN → Clusters: {n_clusters}, Silhouette Score: {score:.2f}")
