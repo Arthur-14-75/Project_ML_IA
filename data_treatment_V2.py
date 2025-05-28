@@ -155,11 +155,33 @@ def compute_symmetry_score(img):
     score = np.sum(np.abs(left[:, :min_w] - right[:, :min_w]))
     return score
 
-def rotate_around_center(image, angle, center):
+def rotate_and_expand(image, angle, center=None, border=0):
+    h, w = image.shape[:2]
+    
+    # Si aucun centre n'est donné, utiliser le centre de l'image
+    if center is None:
+        center = (w / 2, h / 2)
+
+    # Matrice de rotation
     rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv2.warpAffine(image, rot_mat, (image.shape[1], image.shape[0]),
-                              flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    return rotated
+
+    # Calcul des dimensions du nouveau canvas
+    cos = np.abs(rot_mat[0, 0])
+    sin = np.abs(rot_mat[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+
+    # Adapter la matrice de rotation pour le recentrage
+    rot_mat[0, 2] += (new_w / 2) - center[0]
+    rot_mat[1, 2] += (new_h / 2) - center[1]
+
+    # Appliquer la rotation avec expansion
+    rotated = cv2.warpAffine(image, rot_mat, (new_w, new_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=border)
+
+    # Nouveau centre de l’image retournée
+    new_center = (new_w // 2, new_h // 2)
+    
+    return rotated, new_center
 
 
 def find_best_symmetry_angle(gray, mask_bin, center, angle_range=(-30, 30), step=1):
@@ -167,35 +189,47 @@ def find_best_symmetry_angle(gray, mask_bin, center, angle_range=(-30, 30), step
     best_score = float('inf')
     best_rotated_gray = gray.copy()
     best_rotated_mask = mask_bin.copy()
+    best_center = center
 
     for angle in range(angle_range[0], angle_range[1] + 1, step):
-        rotated_gray = rotate_around_center(gray, angle, center)
-        rotated_mask = rotate_around_center(mask_bin, angle, center)
-        
-        # Appliquer le masque pour ne mesurer la symétrie que sur l'objet
+        rotated_gray, center_new = rotate_and_expand(gray, angle, center)
+        rotated_mask, _ = rotate_and_expand(mask_bin, angle, center)
+
         masked = cv2.bitwise_and(rotated_gray, rotated_gray, mask=(rotated_mask > 0).astype(np.uint8))
         score = compute_symmetry_score(masked)
-        
+
         if score < best_score:
             best_score = score
             best_angle = angle
             best_rotated_gray = rotated_gray
             best_rotated_mask = rotated_mask
+            best_center = center_new
 
-    return best_rotated_gray, best_rotated_mask, best_angle
+    return best_rotated_gray, best_rotated_mask, best_angle, best_center
+
+
 
 def draw_symetry_axes(rotated_img, theta, xc, yc, color=(0, 0, 255), thickness=2):
 
     h, w = rotated_img.shape[:2]
-
-    # Calcul du nouveau centre après rotation
-    center_new = (w // 2, h // 2)
-
-    # On dessine une ligne verticale qui passe par le centre de l'image alignée
-    x_axis = int(center_new[0])
     img_with_axis = rotated_img.copy()
-    cv2.line(img_with_axis, (x_axis, 0), (x_axis, h), color, thickness)
 
+    # Convertir l'angle en radians
+    theta_rad = np.deg2rad(theta)
+
+    # Vecteur directeur de l’axe (perpendiculaire au plan de symétrie)
+    dx = np.cos(theta_rad)
+    dy = np.sin(theta_rad)
+
+    # Calculer deux points éloignés dans chaque direction pour tracer une longue ligne
+    length = max(h, w) * 2
+    x1 = int(xc - length * dx)
+    y1 = int(yc - length * dy)
+    x2 = int(xc + length * dx)
+    y2 = int(yc + length * dy)
+
+    # Tracer la ligne
+    cv2.line(img_with_axis, (x1, y1), (x2, y2), color, thickness)
     return img_with_axis
 
 
@@ -261,8 +295,22 @@ for i in range(min_length):
         print(f"Symmetry alignment failed for image {images[i]} : {res_sym.message}")
         cv2.imwrite(f"debug/mask_failed_{images[i]}", cricle_mask * 255)
 
+    contours, _ = cv2.findContours(cricle_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        print(f"No contours found for image {images[i]}.")
+        continue
+    cnt = max(contours, key=cv2.contourArea)
+
+    if len(cnt) < 5:
+        print(f"Contour insuffisant pour ellipse dans {images[i]}")
+        continue
+    ellipse = cv2.fitEllipse(cnt)
+    (center_ellipse, axes, angle) = ellipse
+
+    sym_angle = angle - 90 if axes[0] > axes[1] else angle
+    print(f"Image {images[i]} : ellipse angle = {angle:.2f} → sym_axis = {sym_angle:.2f}")
     
-    gray_sym, mask_sym, theta_best = find_best_symmetry_angle(
+    gray_sym, mask_sym, theta_best, center_new = find_best_symmetry_angle(
     gray_crop,
     cricle_mask,
     center=(xc_best, yc_best),  # centre du cercle
@@ -270,7 +318,7 @@ for i in range(min_length):
     step=1
     )
 
-    image_with_axis = draw_symetry_axes(gray_sym, theta_best, xc_best, yc_best, color=(0, 0, 255), thickness=2)
+    image_with_axis = draw_symetry_axes(gray_sym, theta_best, center_new[0], center_new[1])
 
     os.makedirs('cleaned/images_circle', exist_ok=True)
     os.makedirs('cleaned/images_aligned_with_axis', exist_ok=True)
